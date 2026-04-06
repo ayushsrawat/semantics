@@ -43,6 +43,6 @@ fn main() {
 
 fn print_help() {
     println!(
-        "Semantics Usage: \n    ./semantics --index <path-to-wiki-sentences.txt> \n    ./semantics --search <query>"
+        "Semantics Usage:\n\t./semantics --index <path-to-wiki-sentences.txt> \n\t./semantics --search <query>"
     );
 }
