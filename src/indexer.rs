@@ -9,7 +9,8 @@ use fastembed::{InitOptions, TextEmbedding};
 
 const FASTEMBED_EMBED_MODEL: fastembed::EmbeddingModel = fastembed::EmbeddingModel::BGESmallENV15;
 const FASTEMBED_CACHE_DIR: &str = "/Users/ayushrawat/.cache/fastembed";
-const DOCS_BATCH_SIZE: usize = 32;
+const DOCS_BATCH_SIZE: usize = 256;
+const INPUT_SENTENSES_LIMIT: usize = 10_000; // todo: consider taking limit as a cmd option
 
 pub fn index(path: &str) {
     let path = Path::new(path);
@@ -39,9 +40,18 @@ pub fn index(path: &str) {
 
     // here I would like to create batches of these lines and ask for the model to create the embeddings on per batch
     let mut batch_embed_start = Instant::now();
+    let mut sentense_counter: i32 = 0;
     for line in reader.lines() {
         let line = line.unwrap_or_else(|e| panic!("Error reading line: {}", e));
         batch.push(line);
+        sentense_counter += 1;
+        if sentense_counter >= INPUT_SENTENSES_LIMIT as i32 {
+            println!(
+                "Sentences count LIMIT crossed!! Read {} sentenses, stopping!!",
+                sentense_counter
+            );
+            break;
+        }
 
         if batch.len() >= DOCS_BATCH_SIZE {
             let embeddings = generate_embeddings(&mut model, &batch);
@@ -51,6 +61,12 @@ pub fn index(path: &str) {
             batch.clear();
         }
     }
+
+    // todo! just calculating the embeddings of 256 sentences takes on average 5 secs
+    // for 1M senteses it takes 5.42 hrs which is quite a calculation...
+    // i would like to reduce this time, also is there a better way to go about it?
+    // and it's just about the generating embeddings, we havn't even uploading the embeddings and payload to qdrant!?
+
     if !batch.is_empty() {
         let embeddings = generate_embeddings(&mut model, &batch);
         println!("Last Embeddings length: {}", embeddings.len());
