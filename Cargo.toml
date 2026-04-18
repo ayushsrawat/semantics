@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 fastembed = "5.13.1"
+qdrant-client = "1.17.0"
+tokio = { version = "1.52.1", features = ["full"] }
+uuid = { version = "1", features = ["v5"] }

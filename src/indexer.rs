@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs::File,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -6,13 +7,24 @@ use std::{
 };
 
 use fastembed::{InitOptions, TextEmbedding};
+use qdrant_client::{
+    Qdrant,
+    qdrant::{
+        CollectionExistsRequest, CreateCollectionBuilder, Distance, PointStruct,
+        UpsertPointsBuilder, Value, VectorParamsBuilder,
+    },
+};
+use uuid::Uuid;
 
 const FASTEMBED_EMBED_MODEL: fastembed::EmbeddingModel = fastembed::EmbeddingModel::BGESmallENV15;
 const FASTEMBED_CACHE_DIR: &str = "/Users/ayushrawat/.cache/fastembed";
 const DOCS_BATCH_SIZE: usize = 256;
 const INPUT_SENTENSES_LIMIT: usize = 10_000; // todo: consider taking limit as a cmd option
+const QDRANT_URL: &str = "http://localhost:6334";
+const WIKI_COLLECTION_NAME: &str = "wiki-sentences";
 
-pub fn index(path: &str) {
+#[tokio::main]
+pub async fn index(path: &str) {
     let path = Path::new(path);
     if !path.exists() || !path.is_file() {
         panic!("Error: Invalid input source - {:?}", path.as_os_str());
@@ -30,15 +42,53 @@ pub fn index(path: &str) {
     )
     .unwrap_or_else(|e| panic!("Error while create embedding model: {}", e));
 
+    let supported_models = TextEmbedding::list_supported_models();
+    let model_info = supported_models
+        .iter()
+        .find(|info| info.model == FASTEMBED_EMBED_MODEL)
+        .expect("Model info should exist for supported models");
+    let model_dim: usize = model_info.dim;
+    println!(
+        "Dimension of model {} is [{}]",
+        FASTEMBED_EMBED_MODEL, model_dim
+    );
+
+    let qdrant = Qdrant::from_url(QDRANT_URL)
+        .build()
+        .unwrap_or_else(|e| panic!("Error while connecting to qudrant client: {}", e));
+
+    let response = qdrant
+        .list_collections()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to list collections: {}", e));
+    println!("Available Collections : {:#?}", response);
+
+    let collections_already_exists: bool = qdrant
+        .collection_exists(CollectionExistsRequest::from(WIKI_COLLECTION_NAME))
+        .await
+        .unwrap_or_else(|e| panic!("Error while checking if collection exists: {}", e));
+
+    if !collections_already_exists {
+        println!("Creating Qdrant Collction : {}", WIKI_COLLECTION_NAME);
+        let response = qdrant
+            .create_collection(
+                CreateCollectionBuilder::new(WIKI_COLLECTION_NAME)
+                    .vectors_config(VectorParamsBuilder::new(model_dim as u64, Distance::Cosine)),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("Error create new collection: {}", e));
+        println!(
+            "Successfully created new qdrant collection in : {}",
+            response.time
+        )
+    } else {
+        println!(
+            "Qdrant collection {} already exists! ",
+            WIKI_COLLECTION_NAME
+        );
+    }
+
     let mut batch: Vec<String> = Vec::with_capacity(DOCS_BATCH_SIZE);
-
-    // todo!(index line in the vector database)
-    // step 1: generate vector embeddings of the line
-    // step 2: save the embeddings and payload in the qudrant database
-    // handle cases when data has been already indexed...
-    // don't need to do it again, don't need to generate the embeddings
-
-    // here I would like to create batches of these lines and ask for the model to create the embeddings on per batch
     let mut batch_embed_start = Instant::now();
     let mut sentense_counter: i32 = 0;
     for line in reader.lines() {
@@ -55,8 +105,12 @@ pub fn index(path: &str) {
 
         if batch.len() >= DOCS_BATCH_SIZE {
             let embeddings = generate_embeddings(&mut model, &batch);
-            println!("Embeddings length: {}", embeddings.len());
-            println!("Embeddings elapsed {:?}", batch_embed_start.elapsed());
+            upsert_embeddings(&batch, embeddings, &qdrant).await;
+
+            println!(
+                "Successfully inserted batch! Elapsed {:?}",
+                batch_embed_start.elapsed()
+            );
             batch_embed_start = Instant::now();
             batch.clear();
         }
@@ -64,12 +118,9 @@ pub fn index(path: &str) {
 
     // todo! just calculating the embeddings of 256 sentences takes on average 5 secs
     // for 1M senteses it takes 5.42 hrs which is quite a calculation...
-    // i would like to reduce this time, also is there a better way to go about it?
-    // and it's just about the generating embeddings, we havn't even uploading the embeddings and payload to qdrant!?
-
     if !batch.is_empty() {
         let embeddings = generate_embeddings(&mut model, &batch);
-        println!("Last Embeddings length: {}", embeddings.len());
+        upsert_embeddings(&batch, embeddings, &qdrant).await;
     }
 
     println!("Time elapsed while reading file: {:?}", start.elapsed());
@@ -81,4 +132,24 @@ fn generate_embeddings(model: &mut TextEmbedding, batch: &Vec<String>) -> Vec<Ve
         Ok(v) => v,
         Err(e) => panic!("Error while generating embeddings: {}", e),
     }
+}
+
+async fn upsert_embeddings(batch: &Vec<String>, embeddings: Vec<Vec<f32>>, qdrant: &Qdrant) {
+    let mut points = Vec::with_capacity(batch.len());
+    let namespace = Uuid::NAMESPACE_OID;
+
+    for (text, embedding) in batch.iter().zip(embeddings.into_iter()) {
+        let point_id = Uuid::new_v5(&namespace, text.as_bytes()).to_string();
+
+        let mut payload: HashMap<String, Value> = HashMap::new();
+        payload.insert("text".to_string(), text.clone().into());
+
+        let point = PointStruct::new(point_id, embedding, payload);
+        points.push(point);
+    }
+
+    qdrant
+        .upsert_points(UpsertPointsBuilder::new(WIKI_COLLECTION_NAME, points))
+        .await
+        .unwrap_or_else(|e| panic!("Failed to insert batch into Qdrant: {}", e));
 }
