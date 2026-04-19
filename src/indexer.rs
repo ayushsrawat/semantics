@@ -2,11 +2,11 @@ use std::{
     collections::HashMap,
     fs::File,
     io::{BufRead, BufReader},
-    path::{Path, PathBuf},
+    path::Path,
     time::Instant,
 };
 
-use fastembed::{InitOptions, TextEmbedding};
+use fastembed::TextEmbedding;
 use qdrant_client::{
     Qdrant,
     qdrant::{
@@ -16,12 +16,12 @@ use qdrant_client::{
 };
 use uuid::Uuid;
 
-const FASTEMBED_EMBED_MODEL: fastembed::EmbeddingModel = fastembed::EmbeddingModel::BGESmallENV15;
-const FASTEMBED_CACHE_DIR: &str = "/Users/ayushrawat/.cache/fastembed";
+use crate::core::{
+    FASTEMBED_EMBED_MODEL, WIKI_COLLECTION_NAME, get_model_dimension, init_embedder, init_qdrant,
+};
+
 const DOCS_BATCH_SIZE: usize = 256;
 const INPUT_SENTENSES_LIMIT: usize = 10_000; // todo: consider taking limit as a cmd option
-const QDRANT_URL: &str = "http://localhost:6334";
-const WIKI_COLLECTION_NAME: &str = "wiki-sentences";
 
 #[tokio::main]
 pub async fn index(path: &str) {
@@ -35,27 +35,13 @@ pub async fn index(path: &str) {
     let file = File::open(path).unwrap_or_else(|e| panic!("Error opening file: {}", e));
     let reader: BufReader<File> = BufReader::new(file);
 
-    let mut model = TextEmbedding::try_new(
-        InitOptions::new(FASTEMBED_EMBED_MODEL)
-            .with_show_download_progress(true)
-            .with_cache_dir(PathBuf::from(FASTEMBED_CACHE_DIR)),
-    )
-    .unwrap_or_else(|e| panic!("Error while create embedding model: {}", e));
-
-    let supported_models = TextEmbedding::list_supported_models();
-    let model_info = supported_models
-        .iter()
-        .find(|info| info.model == FASTEMBED_EMBED_MODEL)
-        .expect("Model info should exist for supported models");
-    let model_dim: usize = model_info.dim;
+    let mut embedder = init_embedder();
+    let model_dim: usize = get_model_dimension();
     println!(
         "Dimension of model {} is [{}]",
         FASTEMBED_EMBED_MODEL, model_dim
     );
-
-    let qdrant = Qdrant::from_url(QDRANT_URL)
-        .build()
-        .unwrap_or_else(|e| panic!("Error while connecting to qudrant client: {}", e));
+    let qdrant = init_qdrant();
 
     let response = qdrant
         .list_collections()
@@ -104,7 +90,7 @@ pub async fn index(path: &str) {
         }
 
         if batch.len() >= DOCS_BATCH_SIZE {
-            let embeddings = generate_embeddings(&mut model, &batch);
+            let embeddings = generate_embeddings(&mut embedder, &batch);
             upsert_embeddings(&batch, embeddings, &qdrant).await;
 
             println!(
@@ -119,7 +105,7 @@ pub async fn index(path: &str) {
     // todo! just calculating the embeddings of 256 sentences takes on average 5 secs
     // for 1M senteses it takes 5.42 hrs which is quite a calculation...
     if !batch.is_empty() {
-        let embeddings = generate_embeddings(&mut model, &batch);
+        let embeddings = generate_embeddings(&mut embedder, &batch);
         upsert_embeddings(&batch, embeddings, &qdrant).await;
     }
 
