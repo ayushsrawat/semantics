@@ -1,0 +1,11 @@
+services:
+  qdrant:
+    image: qdrant/qdrant
+    container_name: qdrant_db
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ${QDRANT_VOLUME_PATH}:/qdrant/storage:z
+    restart: unless-stopped
+    
